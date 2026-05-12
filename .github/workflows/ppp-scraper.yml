@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Checkout ECOTDMP_ppp (this repo, for workflow only)
+      - name: Checkout ECOTDMP_ppp (this repo)
         uses: actions/checkout@v4
 
       - name: Checkout main repo (ECOTDMP) to get crawler code
@@ -24,6 +24,11 @@ jobs:
           repository: grcbbdd/ECOTDMP
           token: ${{ secrets.ECOTDMP_PAT }}
           path: ecotdmp
+
+      - name: Verify checkout succeeded
+        run: |
+          echo "=== ECOTDMP checkout verification ==="
+          ls ecotdmp/working_tools/ || echo "ERROR: working_tools not found - checkout may have failed"
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -37,11 +42,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r ecotdmp/working_tools/requirements.txt
 
-      - name: Install Playwright browsers (macOS)
+      - name: Setup Chrome for Selenium (macOS)
         run: |
-          cd ecotdmp/working_tools
-          python -m playwright install chromium
-          python -m playwright install-deps chromium || true
+          echo "=== Chrome version ==="
+          google-chrome --version || /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --version || echo "Chrome not found, using webdriver-manager auto-install"
+
+      - name: Connectivity Check (PPP site)
+        run: |
+          echo "=== Runner IP ==="
+          curl -s https://api.ipify.org && echo ""
+          echo "=== Testing PPP site ==="
+          curl -sv -o /dev/null -w "HTTP Status: %{http_code}\n" --max-time 20 "https://ppp.mof.gov.tw/WWW/inv_ann.aspx" || echo "Connection FAILED"
 
       - name: Run PPP Crawler
         run: |
