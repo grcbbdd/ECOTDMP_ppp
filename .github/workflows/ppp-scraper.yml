@@ -76,21 +76,17 @@ jobs:
         env:
           PYTHONIOENCODING: 'utf-8'
 
-      - name: Update last_update.json
-        run: |
-          TIMESTAMP=$(TZ='Asia/Taipei' date '+%Y-%m-%dT%H:%M:%S+08:00')
-          printf '{"updated_at": "%s", "source": "ppp_macos_runner", "run": "%s"}\n' \
-            "$TIMESTAMP" "${{ github.run_id }}" \
-            > ecotdmp/frontend/public/data/last_update.json
-          echo "Timestamp updated: $TIMESTAMP"
-
       - name: Commit and Push data back to ECOTDMP (main repo)
+        # 只 push 本工作流獨有的檔案，避免跟 daily-scraper.yml 搶寫
+        # last_update.json / award_records.json / company_index.json。
+        # 索引檔由 daily-scraper.yml 下一輪 daily_master_update 統一重新生成
+        # （會包含本次新爬到的 PPP 資料）。
         run: |
           cd ecotdmp
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
 
-          git add frontend/public/data/*.json
+          git add frontend/public/data/master_ppp.json frontend/public/data/master_ppp_index.json 2>/dev/null || true
           git add working_tools/爬蟲資料範例/ 2>/dev/null || true
 
           if git diff --staged --quiet; then
