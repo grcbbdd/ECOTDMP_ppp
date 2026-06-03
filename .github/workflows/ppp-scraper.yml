@@ -77,21 +77,28 @@ jobs:
           PYTHONIOENCODING: 'utf-8'
 
       - name: Commit and Push data back to ECOTDMP (main repo)
-        # 只 push 本工作流獨有的檔案，避免跟 daily-scraper.yml 搶寫
-        # last_update.json / award_records.json / company_index.json。
-        # 索引檔由 daily-scraper.yml 下一輪 daily_master_update 統一重新生成
-        # （會包含本次新爬到的 PPP 資料）。
+        # 只在 master_ppp.json / master_ppp_index.json 有真實變更（忽略 updated_at）
+        # 時才寫 last_update_ppp.json 並 push，避免推一份空更新。
+        # 不寫 last_update.json / award_records.json / company_index.json，
+        # 那些檔案由主 repo 的 daily-scraper.yml 獨佔管理。
         run: |
           cd ecotdmp
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
 
-          git add frontend/public/data/master_ppp.json frontend/public/data/master_ppp_index.json 2>/dev/null || true
-          git add working_tools/爬蟲資料範例/ 2>/dev/null || true
+          if python working_tools/check_real_change.py \
+              frontend/public/data/master_ppp.json \
+              frontend/public/data/master_ppp_index.json; then
+            echo "✓ PPP 真實變更，更新 last_update_ppp.json 並 push"
+            TIMESTAMP=$(TZ='Asia/Taipei' date '+%Y-%m-%dT%H:%M:%S+08:00')
+            printf '{"updated_at": "%s", "source": "ppp_macos_runner", "run": "%s", "group": "ppp"}\n' \
+              "$TIMESTAMP" "${{ github.run_id }}" > frontend/public/data/last_update_ppp.json
 
-          if git diff --staged --quiet; then
-            echo "No PPP data changes to commit"
-          else
+            git add frontend/public/data/master_ppp.json \
+                    frontend/public/data/master_ppp_index.json \
+                    frontend/public/data/last_update_ppp.json
+            git add working_tools/爬蟲資料範例/ 2>/dev/null || true
+
             TW_TIME=$(TZ='Asia/Taipei' date '+%Y-%m-%d %H:%M')
             git commit -m "auto-update ppp data (macOS runner) $TW_TIME"
             for i in 1 2 3; do
@@ -100,4 +107,6 @@ jobs:
               echo "Attempt $i failed, retrying in 10s..."
               sleep 10
             done
+          else
+            echo "ℹ️  PPP 無真實變更（只有 updated_at 差），跳過 commit/push"
           fi
