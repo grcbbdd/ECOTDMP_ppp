@@ -5,6 +5,7 @@ on:
   workflow_dispatch:
 
   # 每日自動排程 08:30 台灣時間 = UTC 00:30
+  # （GitHub 排程常延遲 3~4 小時，實際執行多在 12:00~13:30 TW）
   schedule:
     - cron: '30 0 * * 1-5'
 
@@ -55,16 +56,19 @@ jobs:
           curl -sv -o /dev/null -w "HTTP Status: %{http_code}\n" --max-time 20 "https://ppp.mof.gov.tw/WWW/inv_ann.aspx" || echo "Connection FAILED"
 
       - name: Run PPP Crawler
+        # 失敗就讓 job 紅燈。原本接 || true 會把爬蟲崩潰掩蓋成 success，
+        # 導致「無新資料」與「爬蟲掛了」無法區分（2026-06-11 移除）。
         run: |
           cd ecotdmp/working_tools
           mkdir -p 爬蟲資料範例
           echo "Starting PPP crawler on macOS runner..."
-          python batch_run_crawlers.py --crawlers promotion 2>&1 || true
+          python batch_run_crawlers.py --crawlers promotion 2>&1
           echo "PPP crawler finished"
         env:
           PYTHONIOENCODING: 'utf-8'
 
       - name: Check output files
+        if: always()
         run: |
           echo "=== Crawler output files ==="
           ls -lh ecotdmp/working_tools/爬蟲資料範例/ 2>/dev/null || echo "No output files found"
@@ -72,15 +76,16 @@ jobs:
       - name: Run daily_master_update to merge PPP data
         run: |
           cd ecotdmp/working_tools
-          python daily_master_update.py --no-push --no-cleanup 2>&1 || true
+          python daily_master_update.py --no-push --no-cleanup 2>&1
         env:
           PYTHONIOENCODING: 'utf-8'
 
-      - name: Commit and Push data back to ECOTDMP (main repo)
-        # 只在 master_ppp.json / master_ppp_index.json 有真實變更（忽略 updated_at）
-        # 時才寫 last_update_ppp.json 並 push，避免推一份空更新。
-        # 不寫 last_update.json / award_records.json / company_index.json，
-        # 那些檔案由主 repo 的 daily-scraper.yml 獨佔管理。
+      - name: Push data to ppp-data branch and dispatch merge
+        # 單一寫入者架構（2026-06-11 改制）：
+        # 不再直接 push main（會與 daily-scraper 撞車，需要 rebase/autostash hack），
+        # 改 force-push 到主 repo 的 ppp-data 中繼分支（唯一寫入者是本 runner，
+        # 可安全覆蓋），再發 repository_dispatch 讓主 repo 的 ppp-merge.yml
+        # 在 data-push concurrency group 內串行合併進 main。
         run: |
           cd ecotdmp
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -89,7 +94,7 @@ jobs:
           if python working_tools/check_real_change.py \
               frontend/public/data/master_ppp.json \
               frontend/public/data/master_ppp_index.json; then
-            echo "✓ PPP 真實變更，更新 last_update_ppp.json 並 push"
+            echo "✓ PPP 真實變更，推送至 ppp-data 分支"
             TIMESTAMP=$(TZ='Asia/Taipei' date '+%Y-%m-%dT%H:%M:%S+08:00')
             printf '{"updated_at": "%s", "source": "ppp_macos_runner", "run": "%s", "group": "ppp"}\n' \
               "$TIMESTAMP" "${{ github.run_id }}" > frontend/public/data/last_update_ppp.json
@@ -101,12 +106,15 @@ jobs:
 
             TW_TIME=$(TZ='Asia/Taipei' date '+%Y-%m-%d %H:%M')
             git commit -m "auto-update ppp data (macOS runner) $TW_TIME"
-            for i in 1 2 3; do
-              echo "Push attempt $i..."
-              git pull --rebase origin main --autostash && git push origin main && echo "Push completed" && break
-              echo "Attempt $i failed, retrying in 10s..."
-              sleep 10
-            done
+            git push origin HEAD:refs/heads/ppp-data --force
+
+            echo "✓ 觸發主 repo ppp-merge 工作流"
+            curl -sf -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${{ secrets.ECOTDMP_PAT }}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              https://api.github.com/repos/grcbbdd/ECOTDMP/dispatches \
+              -d '{"event_type":"ppp-data-updated"}'
           else
-            echo "ℹ️  PPP 無真實變更（只有 updated_at 差），跳過 commit/push"
+            echo "ℹ️  PPP 無真實變更（只有 updated_at 差），跳過 push"
           fi
