@@ -6,13 +6,15 @@ on:
 
   # 每日自動排程 08:30 台灣時間 = UTC 00:30
   # （GitHub 排程常延遲 3~4 小時，實際執行多在 12:00~13:30 TW）
+  # 注意：ppp.mof.gov.tw 封鎖 Azure 雲端 IP（HTTP 000），連線預檢失敗時此 job 會
+  # 立即跳過，改由本機 Linux cron (daily_ppp_workflow.sh) 擔任主要爬蟲來源。
   schedule:
     - cron: '30 0 * * 1-5'
 
 jobs:
   run-ppp-crawler:
     name: 促參平台爬蟲（macOS Runner）
-    runs-on: macos-latest   # macOS Runner 可繞過政府 IP 封鎖
+    runs-on: macos-latest   # macOS Runner — 但 Azure IP 仍可能被封鎖，見預檢步驟
     timeout-minutes: 60
 
     steps:
@@ -31,7 +33,24 @@ jobs:
           echo "=== ECOTDMP checkout verification ==="
           ls ecotdmp/working_tools/ || echo "ERROR: working_tools not found - checkout may have failed"
 
+      - name: Connectivity pre-check (skip entire job if site unreachable)
+        id: connectivity
+        run: |
+          echo "=== Runner IP ==="
+          curl -s https://api.ipify.org && echo ""
+          echo "=== Testing PPP site (10s timeout) ==="
+          if curl -sf --max-time 10 "https://ppp.mof.gov.tw/WWW/inv_ann.aspx" -o /dev/null 2>/dev/null; then
+            echo "✅ ppp.mof.gov.tw 可連線，繼續爬蟲"
+            echo "accessible=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "⚠️  ppp.mof.gov.tw 從此 runner 無法連線（HTTP 000 / timeout）"
+            echo "   Azure 雲端 IP 被台灣政府網站封鎖，已知問題。"
+            echo "   本機 Linux cron (daily_ppp_workflow.sh --force) 為主要 PPP 資料來源。"
+            echo "accessible=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Python 3.11
+        if: steps.connectivity.outputs.accessible == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -39,23 +58,19 @@ jobs:
           cache-dependency-path: 'ecotdmp/working_tools/requirements.txt'
 
       - name: Install Python Dependencies
+        if: steps.connectivity.outputs.accessible == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install -r ecotdmp/working_tools/requirements.txt
 
       - name: Setup Chrome for Selenium (macOS)
+        if: steps.connectivity.outputs.accessible == 'true'
         run: |
           echo "=== Chrome version ==="
           google-chrome --version || /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --version || echo "Chrome not found, using webdriver-manager auto-install"
 
-      - name: Connectivity Check (PPP site)
-        run: |
-          echo "=== Runner IP ==="
-          curl -s https://api.ipify.org && echo ""
-          echo "=== Testing PPP site ==="
-          curl -sv -o /dev/null -w "HTTP Status: %{http_code}\n" --max-time 20 "https://ppp.mof.gov.tw/WWW/inv_ann.aspx" || echo "Connection FAILED"
-
       - name: Run PPP Crawler
+        if: steps.connectivity.outputs.accessible == 'true'
         # 失敗就讓 job 紅燈。原本接 || true 會把爬蟲崩潰掩蓋成 success，
         # 導致「無新資料」與「爬蟲掛了」無法區分（2026-06-11 移除）。
         run: |
@@ -68,12 +83,13 @@ jobs:
           PYTHONIOENCODING: 'utf-8'
 
       - name: Check output files
-        if: always()
+        if: steps.connectivity.outputs.accessible == 'true'
         run: |
           echo "=== Crawler output files ==="
           ls -lh ecotdmp/working_tools/爬蟲資料範例/ 2>/dev/null || echo "No output files found"
 
       - name: Run daily_master_update to merge PPP data
+        if: steps.connectivity.outputs.accessible == 'true'
         run: |
           cd ecotdmp/working_tools
           python daily_master_update.py --no-push --no-cleanup 2>&1
@@ -81,10 +97,11 @@ jobs:
           PYTHONIOENCODING: 'utf-8'
 
       - name: Push data to ppp-data branch and dispatch merge
+        if: steps.connectivity.outputs.accessible == 'true'
         # 單一寫入者架構（2026-06-11 改制）：
-        # 不再直接 push main（會與 daily-scraper 撞車，需要 rebase/autostash hack），
-        # 改 force-push 到主 repo 的 ppp-data 中繼分支（唯一寫入者是本 runner，
-        # 可安全覆蓋），再發 repository_dispatch 讓主 repo 的 ppp-merge.yml
+        # 不再直接 push main（會與 daily-scraper 撞車），
+        # 改 force-push 到主 repo 的 ppp-data 中繼分支，
+        # 再發 repository_dispatch 讓主 repo 的 ppp-merge.yml
         # 在 data-push concurrency group 內串行合併進 main。
         run: |
           cd ecotdmp
